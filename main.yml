@@ -1,0 +1,116 @@
+---
+- name: Kubernetes on Vagrant Setup
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars:
+    swap_file_state: absent
+    swapfile_path: /swap
+    containerd_config_cgroup_driver_systemd: true
+    kubernetes_version: "1.33"
+    kubernetes_allow_pods_on_master: true
+    kubernetes_apiserver_advertise_address: "{{ ansible_eth1.ipv4.address }}"
+    kubernetes_kubelet_extra_args: "--node-ip={{ ansible_eth1.ipv4.address }}"
+    kubernetes_flannel_manifest_file: /home/vagrant/kube-flannel.yml
+    kubernetes_config_kubelet_configuration:
+      cgroupDriver: "systemd"
+      containerRuntimeEndpoint: "unix://var/run/containerd/containerd.sock"
+
+  pre_tasks:
+    - name: Refresh package cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Upgrade all packages
+      ansible.builtin.apt:
+        upgrade: dist
+
+    - name: Set required kernel modules to load at boot
+      ansible.builtin.blockinfile:
+        path: /etc/modules-load.d/k8s.conf
+        create: true
+        mode: "0644"
+        owner: root
+        group: root
+        state: present
+        block: |
+          br_netfilter
+          overlay
+
+    - name: Load required kernel modules
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - br_netfilter
+        - overlay
+
+    - name: Ensure required sysctl parameters are set
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: true
+      loop:
+        - { name: "net.ipv4.ip_forward", value: "1" }
+        - { name: "net.ipv6.conf.default.disable_ipv6", value: "1" }
+        - { name: "net.bridge.bridge-nf-call-iptables", value: "1" }
+        - { name: "net.bridge.bridge-nf-call-ip6tables", value: "1" }
+
+    - name: Remove swapfile from /etc/fstab
+      ansible.posix.mount:
+        name: "{{ item }}"
+        fstype: swap
+        state: absent
+      loop:
+        - swap
+        - none
+
+    - name: Disable swap
+      ansible.builtin.command:
+        cmd: swapoff -a
+      changed_when: false
+      when: ansible_swaptotal_mb > 0
+
+    - name: Add all nodes to /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        state: present
+        # yamllint disable rule:line-length
+        block: |
+          {% for host in groups['all'] %}
+          {{ hostvars[host]['ansible_facts']['eth1']['ipv4']['address'] }} {{ hostvars[host]['ansible_hostname'] }} {{ hostvars[host]['inventory_hostname_short'] }}
+          {% endfor %}
+        # yamllint enable rule:line-length
+
+    - name: Get the kube-flannel.yml file
+      when: inventory_hostname_short == 'control0'
+      ansible.builtin.get_url:
+        url: https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+        dest: "{{ kubernetes_flannel_manifest_file }}"
+        mode: "0644"
+        owner: root
+        group: root
+
+    - name: Patch kube-flannel.yml
+      when: inventory_hostname_short == 'control0'
+      ansible.posix.patch:
+        src: "kube-flannel.yml.patch"
+        dest: "{{ kubernetes_flannel_manifest_file }}"
+
+  roles:
+    - geerlingguy.swap
+    - geerlingguy.security
+    - geerlingguy.containerd
+    - geerlingguy.kubernetes
+
+  post_tasks:
+    - name: Copy kubeconfig to the home directory on the host
+      when: inventory_hostname_short == 'control0'
+      become: true
+      ansible.builtin.fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ lookup('env', 'HOME') }}/.kube/config.vagrant"
+        flat: true

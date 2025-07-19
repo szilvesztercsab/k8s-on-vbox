@@ -1,0 +1,10 @@
+--- /tmp/kube-flannel.yml       2025-07-21 16:44:05.517013532 -0700
++++ /tmp/kube-flannel.yml.patched       2025-07-21 16:42:58.073013789 -0700
+@@ -164,6 +164,7 @@
+         args:
+         - --ip-masq
+         - --kube-subnet-mgr
++        - --iface=eth1
+         resources:
+           requests:
+             cpu: "100m"
